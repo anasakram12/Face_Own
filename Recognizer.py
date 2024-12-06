@@ -9,6 +9,8 @@ import onnxruntime
 from tkinter import Tk, Label, Button, filedialog, Toplevel
 from tkinter.scrolledtext import ScrolledText
 from tqdm import tqdm
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 
 # Preprocess images for the ONNX model
@@ -34,6 +36,13 @@ def extract_embedding(model, image_tensor):
     input_name = model.get_inputs()[0].name
     embedding = model.run(None, {input_name: image_tensor})[0]
     return embedding.flatten()
+
+
+# Compute cosine similarity between two embeddings
+def cosine_similarity(embedding1, embedding2):
+    embedding1 = embedding1 / np.linalg.norm(embedding1)
+    embedding2 = embedding2 / np.linalg.norm(embedding2)
+    return np.dot(embedding1, embedding2)
 
 
 # Read last update timestamp from CSV
@@ -95,25 +104,17 @@ def update_embeddings_with_timestamp(model, database_folder, embeddings_file, ti
     return embeddings
 
 
-# Periodic update function
-def periodic_update(model, database_folder, embeddings_file, timestamp_csv, interval=600):
-    while True:
-        print("Running periodic embedding update...")
-        update_embeddings_with_timestamp(model, database_folder, embeddings_file, timestamp_csv)
-        print(f"Next update in {interval // 60} minutes.")
-        time.sleep(interval)  # Wait for the specified interval
+# Recognize a new image and display results
+def recognize_and_display(image_path, embeddings_file, model, threshold=0.5, top_k=5):
+    # Load existing embeddings
+    if not os.path.exists(embeddings_file):
+        print(f"Embeddings file {embeddings_file} not found. Please generate it first.")
+        return
 
+    with open(embeddings_file, 'rb') as f:
+        embeddings = pickle.load(f)
 
-# Compute cosine similarity between two embeddings
-def cosine_similarity(embedding1, embedding2):
-    embedding1 = embedding1 / np.linalg.norm(embedding1)
-    embedding2 = embedding2 / np.linalg.norm(embedding2)
-    return np.dot(embedding1, embedding2)
-
-
-# Match selected image to database embeddings and find top 5 matches
-def match_image(image_path, embeddings, model, threshold=0.5, top_k=5):
-    # Preprocess and extract embedding for the selected image
+    # Preprocess and extract embedding for the new image
     img_tensor = preprocess_image(image_path)
     input_embedding = extract_embedding(model, img_tensor)
 
@@ -128,17 +129,18 @@ def match_image(image_path, embeddings, model, threshold=0.5, top_k=5):
     similarities.sort(key=lambda x: x[1], reverse=True)
     top_matches = similarities[:top_k]
 
-    return top_matches
+    # Display results
+    display_results(image_path, top_matches)
 
 
 # Display the selected image and results in a new window
 def display_results(image_path, matches):
     # Create a new window
     result_window = Toplevel()
-    result_window.title("Matching Results")
+    result_window.title("Recognition Results")
     result_window.geometry("600x600")
 
-    # Display the selected image
+    # Display the new image
     img = Image.open(image_path)
     img.thumbnail((300, 300))
     img = ImageTk.PhotoImage(img)
@@ -149,66 +151,71 @@ def display_results(image_path, matches):
     # Display the top matches
     result_text = ScrolledText(result_window, wrap="word", width=70, height=20)
     result_text.pack(pady=10)
-    result_text.insert("1.0", f"Top matches for {os.path.basename(image_path)}:\n\n")
+    result_text.insert("1.0", f"Recognition Results for {os.path.basename(image_path)}:\n\n")
     for rank, (match_image, similarity) in enumerate(matches, start=1):
         result_text.insert("end", f"{rank}. {match_image} (Similarity: {similarity:.2f})\n")
     result_text.config(state="disabled")
 
 
-# Select an image and find its matches
-def select_and_match_image(model, embeddings_file, database_folder, timestamp_csv):
-    # Update embeddings with new images in the database folder
-    embeddings = update_embeddings_with_timestamp(model, database_folder, embeddings_file, timestamp_csv)
+# Watchdog event handler for input folder monitoring
+class InputFolderEventHandler(FileSystemEventHandler):
+    def __init__(self, model, embeddings_file):
+        self.model = model
+        self.embeddings_file = embeddings_file
 
-    # Open file dialog to select an image
-    file_path = filedialog.askopenfilename(
-        title="Select an Image",
-        filetypes=[("Image Files", "*.jpg;*.jpeg;*.png")]
-    )
-    if not file_path:
-        return
+    def on_created(self, event):
+        if not event.is_directory and event.src_path.lower().endswith(('.jpg', '.jpeg', '.png')):
+            print(f"New image detected: {event.src_path}")
+            recognize_and_display(event.src_path, self.embeddings_file, self.model)
 
-    # Match the selected image
-    matches = match_image(file_path, embeddings, model)
-    if matches:
-        display_results(file_path, matches)
-    else:
-        print("No matches found.")
+
+# Start monitoring the input folder
+def start_monitoring(model, input_folder, embeddings_file):
+    event_handler = InputFolderEventHandler(model, embeddings_file)
+    observer = Observer()
+    observer.schedule(event_handler, path=input_folder, recursive=False)
+    observer.start()
+    print(f"Started monitoring {input_folder} for new images.")
+    return observer
 
 
 # Main function with GUI
 def main():
     # Load the ONNX model
-    onnx_model_path = "glintr100.onnx"  # Path to the ONNX model
-    embeddings_file = "image_embeddings.pkl"  # Existing embeddings file
-    database_folder = "Database_Images"  # Folder containing images for the database
-    timestamp_csv = "last_update.csv"  # CSV file to store the last update timestamp
-    interval = 600  # Time interval in seconds (10 minutes)
+    onnx_model_path = "Sources/glintr100.onnx"  # Path to the ONNX model
+    embeddings_file = "Sources/image_embeddings.pkl"  # Path to embeddings file
+    database_folder = "Sources/Database_Images"  # Folder containing database images
+    timestamp_csv = "Sources/last_update.csv"  # CSV file to store the last update timestamp
+    os.makedirs(database_folder, exist_ok=True)  # Ensure database folder exists
     model = load_onnx_model(onnx_model_path)
-
-    # Start periodic updates in a separate thread
-    update_thread = threading.Thread(
-        target=periodic_update,
-        args=(model, database_folder, embeddings_file, timestamp_csv, interval),
-        daemon=True
-    )
-    update_thread.start()
 
     # Create the main window
     root = Tk()
-    root.title("Image Matching")
-    root.geometry("400x200")
+    root.title("Image Recognition")
+    root.geometry("400x250")
+
+    # Variable to store selected input folder
+    input_folder_var = {"path": None}
+
+    # Function to select input folder
+    def select_input_folder():
+        folder_selected = filedialog.askdirectory(title="Select Input Folder")
+        if folder_selected:
+            input_folder_var["path"] = folder_selected
+            Label(root, text=f"Monitoring Folder: {folder_selected}", font=("Arial", 10)).pack(pady=10)
+            # Start monitoring the selected folder
+            start_monitoring(model, folder_selected, embeddings_file)
 
     # Add a label
-    Label(root, text="Select an image to find matches", font=("Arial", 14)).pack(pady=20)
+    Label(root, text="Select an input folder to monitor for new images:", font=("Arial", 12)).pack(pady=20)
 
-    # Add a button to select an image
+    # Add a button to select input folder
     Button(
         root,
-        text="Select Image",
+        text="Select Folder",
         font=("Arial", 12),
-        command=lambda: select_and_match_image(model, embeddings_file, database_folder, timestamp_csv)
-    ).pack(pady=20)
+        command=select_input_folder
+    ).pack(pady=10)
 
     # Run the GUI
     root.mainloop()

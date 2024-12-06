@@ -3,6 +3,7 @@ import cv2
 import logging
 import numpy as np
 import pickle
+import shutil
 import tkinter as tk
 from tkinter import filedialog
 from PIL import Image
@@ -89,7 +90,7 @@ def load_onnx_model(model_path):
     return session
 
 # Generate or Update Embeddings
-def generate_or_update_embeddings(model, input_folder, output_file, log_file):
+def generate_or_update_embeddings(model, input_folder, output_file, log_file, database_folder):
     if os.path.exists(output_file):
         with open(output_file, 'rb') as f:
             embeddings = pickle.load(f)
@@ -105,6 +106,8 @@ def generate_or_update_embeddings(model, input_folder, output_file, log_file):
 
     updated_count = 0
     print(f"Processing images in {input_folder}...")
+
+    os.makedirs(database_folder, exist_ok=True)  # Ensure database folder exists
 
     for image_file in tqdm(os.listdir(input_folder), desc="Processing images"):
         if image_file in existing_files:  # Skip images that already have embeddings
@@ -122,6 +125,9 @@ def generate_or_update_embeddings(model, input_folder, output_file, log_file):
         )[0].flatten()
         updated_count += 1
 
+        # Copy original image to database folder
+        shutil.copy(image_path, os.path.join(database_folder, image_file))
+
     with open(output_file, 'wb') as f:
         pickle.dump(embeddings, f)
 
@@ -132,12 +138,14 @@ def generate_or_update_embeddings(model, input_folder, output_file, log_file):
                 writer.writerow([filename])
 
     print(f"Updated {updated_count} embeddings. Total embeddings saved to {output_file}.")
+    print(f"Processed images have been copied to {database_folder}.")
 
 # Main Function
 def main():
-    onnx_model_path = "glintr100.onnx"
-    output_file = "image_embeddings.pkl"
-    log_file = "processed_files_log.csv"
+    onnx_model_path = "Sources/glintr100.onnx"
+    output_file = "Sources/image_embeddings.pkl"
+    log_file = "Sources/processed_files_log.csv"
+    database_folder = "Sources/Database_Images"
 
     root = tk.Tk()
     root.withdraw()
@@ -147,7 +155,7 @@ def main():
         return
 
     model = load_onnx_model(onnx_model_path)
-    generate_or_update_embeddings(model, input_folder, output_file, log_file)
+    generate_or_update_embeddings(model, input_folder, output_file, log_file, database_folder)
 
 if __name__ == "__main__":
     main()
